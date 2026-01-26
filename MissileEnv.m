@@ -158,37 +158,36 @@ classdef MissileEnv < rl.env.MATLABEnvironment
             this.Time = this.Time + this.Ts;
             this.CurrentStep = this.CurrentStep + 1;
 
-            % Reward calculation
-            if abs(nzRef) > 1
-                normErr = err / abs(nzRef);
-            else
-                normErr = err;
-            end
+            % Reward calculation - scaled to be more manageable
             deltaK = k - this.PrevK;
 
-            % Main reward: tracking performance
-            reward = -normErr^2;
+            % Scale error to reasonable range
+            errScaled = err / 50;  % Normalize by typical reference magnitude
 
-            % Penalty for oscillations
-            reward = reward - 0.01 * (errDot/100)^2;
+            % Main reward: tracking performance (quadratic penalty, scaled)
+            reward = -errScaled^2;
 
-            % Penalty for rapid k changes
-            reward = reward - 0.02 * (deltaK * 10)^2;
+            % Small penalty for oscillations in error derivative
+            reward = reward - 0.001 * (errDot/100)^2;
 
-            % Bonus for good tracking
+            % Small penalty for rapid k changes (encourage smoothness)
+            reward = reward - 0.01 * deltaK^2;
+
+            % Bonus for good tracking (within 5g of reference)
             if abs(err) < 5
-                reward = reward + 0.1 * (1 - abs(err)/5);
+                reward = reward + 0.5 * (1 - abs(err)/5);
             end
 
-            % Penalty for extreme states (but don't terminate)
+            % Smaller penalties for extreme states
             if abs(this.State(1)) > 30
-                reward = reward - 0.5;
+                reward = reward - 0.1;
             end
             if abs(newNz) > 100
-                reward = reward - 0.5;
+                reward = reward - 0.1;
             end
 
-            reward = max(-10, min(1, reward));
+            % Clamp reward to reasonable range per step
+            reward = max(-2, min(1, reward));
             this.PrevK = k;
 
             % Observation
