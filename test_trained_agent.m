@@ -2,68 +2,59 @@
 % This script loads the trained agent and runs simulation tests
 % Author: Anirudha Talmale
 
-clear; clc; close all;
+clear all; clc; close all;
 
 %% Load Data and Trained Agent
+fprintf('Loading trained agent...\n');
 load('Data.mat');
 load('trained_td3_agent.mat', 'agent');
 
-%% Open Simulink Model
-mdl = 'Hinf_PID_RL';
-open_system(mdl);
-
-%% Configure for Simulation (not training)
-% Set simulation time
-simTime = 12;  % seconds
+%% Create Environment for Testing
+env = MissileEnv();
 
 %% Run Simulation with Trained Agent
-disp('Running simulation with trained TD3 agent...');
-simOptions = rlSimulationOptions('MaxSteps', simTime/0.01);
-experience = sim(env, agent, simOptions);
+fprintf('Running simulation with trained TD3 agent...\n');
 
-%% Extract Results
-time = experience.Observation.observations.Time;
-observations = squeeze(experience.Observation.observations.Data);
-actions = squeeze(experience.Action.k.Data);
+simOpts = rlSimulationOptions('MaxSteps', 1200);  % 12 seconds
+experience = sim(env, agent, simOpts);
 
-error = observations(1,:);
-error_dot = observations(2,:);
-nz = observations(3,:);
+%% Extract Results from Experience
+obsData = experience.Observation.observations.Data;
+actData = experience.Action.k.Data;
+time = (0:size(obsData,3)-1) * 0.01;  % Time vector
 
-%% Load workspace data from simulation
-% The ToWorkspace blocks save nz and alpha
+% Extract signals (observations are [error; errorDot; nz])
+error_signal = squeeze(obsData(1,1,:));
+error_dot = squeeze(obsData(2,1,:));
+nz_actual = squeeze(obsData(3,1,:));
+k_values = squeeze(actData);
+
+% Reconstruct reference signal
+ref_values = [50, -40, -15, 15, -1, 40];
+nz_ref = zeros(size(time));
+for i = 1:length(time)
+    refIdx = mod(floor(time(i) / 2), 6) + 1;
+    nz_ref(i) = ref_values(refIdx);
+end
 
 %% Plot Results
 figure('Name', 'TD3 Controller Performance', 'Position', [100 100 1200 800]);
 
 % Plot 1: Normal Acceleration Tracking
 subplot(2,2,1);
-plot(time, nz, 'b-', 'LineWidth', 1.5);
+plot(time, nz_ref, 'r--', 'LineWidth', 1.5, 'DisplayName', 'Reference');
 hold on;
-% Plot reference (from repeating sequence)
-ref_values = [50 -40 -15 15 -1 40];
-ref_times = 0:2:10;
-for i = 1:length(ref_times)
-    if i < length(ref_times)
-        t_start = ref_times(i);
-        t_end = ref_times(i+1);
-    else
-        t_start = ref_times(i);
-        t_end = simTime;
-    end
-    idx = (time >= t_start) & (time < t_end);
-    plot(time(idx), ref_values(i)*ones(sum(idx),1), 'r--', 'LineWidth', 1.5);
-end
+plot(time, nz_actual, 'b-', 'LineWidth', 1.5, 'DisplayName', 'Actual nz');
 hold off;
 xlabel('Time (s)');
 ylabel('Normal Acceleration (g)');
 title('Normal Acceleration Tracking');
-legend('Actual nz', 'Reference', 'Location', 'best');
+legend('Location', 'best');
 grid on;
 
 % Plot 2: Tracking Error
 subplot(2,2,2);
-plot(time, error, 'b-', 'LineWidth', 1.5);
+plot(time, error_signal, 'b-', 'LineWidth', 1.5);
 xlabel('Time (s)');
 ylabel('Error (g)');
 title('Tracking Error (nz_{ref} - nz)');
@@ -71,7 +62,7 @@ grid on;
 
 % Plot 3: Weighting Factor k
 subplot(2,2,3);
-plot(time, actions, 'g-', 'LineWidth', 1.5);
+plot(time, k_values, 'g-', 'LineWidth', 1.5);
 xlabel('Time (s)');
 ylabel('k');
 title('RL Agent Output: Weighting Factor k');
@@ -80,31 +71,56 @@ grid on;
 
 % Plot 4: Controller Blend Analysis
 subplot(2,2,4);
-bar([mean(actions) mean(1-actions)]);
-set(gca, 'XTickLabel', {'H-inf', 'PID'});
+avg_k = mean(k_values);
+bar([avg_k, 1-avg_k]);
+set(gca, 'XTickLabel', {'H-inf Weight', 'PID Weight'});
 ylabel('Average Weight');
-title('Average Controller Contribution');
+title(sprintf('Average Controller Contribution (k=%.3f)', avg_k));
 grid on;
 
 %% Performance Metrics
-disp('=== Performance Metrics ===');
-disp(['Mean Absolute Error: ', num2str(mean(abs(error)), '%.4f'), ' g']);
-disp(['Max Absolute Error: ', num2str(max(abs(error)), '%.4f'), ' g']);
-disp(['RMS Error: ', num2str(rms(error), '%.4f'), ' g']);
-disp(['Average k (H-inf weight): ', num2str(mean(actions), '%.4f')]);
+fprintf('\n=== Performance Metrics ===\n');
+fprintf('Mean Absolute Error: %.4f g\n', mean(abs(error_signal)));
+fprintf('Max Absolute Error: %.4f g\n', max(abs(error_signal)));
+fprintf('RMS Error: %.4f g\n', rms(error_signal));
+fprintf('Average k (H-inf weight): %.4f\n', avg_k);
 
-%% Calculate ITAE (Integral Time Absolute Error)
-dt = time(2) - time(1);
-ITAE = sum(time .* abs(error')) * dt;
-disp(['ITAE: ', num2str(ITAE, '%.4f')]);
+% Calculate ITAE
+dt = 0.01;
+ITAE = sum(time(:) .* abs(error_signal(:))) * dt;
+fprintf('ITAE: %.4f\n', ITAE);
 
-%% Save Results
-save('simulation_results.mat', 'time', 'nz', 'error', 'actions');
-disp('Results saved to simulation_results.mat');
+%% Save figure
+saveas(gcf, 'td3_controller_results.png');
+fprintf('\nResults saved to td3_controller_results.png\n');
 
-%% Compare with Fuzzy Logic (Optional)
-% If you have results from the fuzzy logic controller, load and compare:
-% load('fuzzy_results.mat');
-% figure;
-% plot(time, error_rl, 'b-', time, error_fuzzy, 'r--');
-% legend('RL Controller', 'Fuzzy Logic');
+%% Additional Analysis - Step Response Details
+figure('Name', 'Step Response Analysis', 'Position', [150 150 800 600]);
+
+% Find settling times for each step
+subplot(2,1,1);
+plot(time, nz_ref, 'r--', 'LineWidth', 1.5);
+hold on;
+plot(time, nz_actual, 'b-', 'LineWidth', 1.5);
+hold off;
+xlabel('Time (s)');
+ylabel('nz (g)');
+title('Step Response Tracking');
+legend('Reference', 'Actual', 'Location', 'best');
+grid on;
+
+subplot(2,1,2);
+plot(time, k_values, 'g-', 'LineWidth', 1.5);
+hold on;
+% Add reference change markers
+for i = 1:5
+    xline(i*2, '--k', 'Alpha', 0.5);
+end
+hold off;
+xlabel('Time (s)');
+ylabel('k');
+title('Controller Blending Over Time');
+grid on;
+
+saveas(gcf, 'td3_step_analysis.png');
+fprintf('Step analysis saved to td3_step_analysis.png\n');
