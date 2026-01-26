@@ -19,15 +19,37 @@ simOpts = rlSimulationOptions('MaxSteps', 1200);  % 12 seconds
 experience = sim(env, agent, simOpts);
 
 %% Extract Results from Experience
+% Get observation data
 obsData = experience.Observation.observations.Data;
-actData = experience.Action.k.Data;
-time = (0:size(obsData,3)-1) * 0.01;  % Time vector
+numSteps = size(obsData, 3);
+time = (0:numSteps-1) * 0.01;  % Time vector
 
 % Extract signals (observations are [error; errorDot; nz])
 error_signal = squeeze(obsData(1,1,:));
 error_dot = squeeze(obsData(2,1,:));
 nz_actual = squeeze(obsData(3,1,:));
+
+% Get action data
+actData = experience.Action.k.Data;
 k_values = squeeze(actData);
+
+% Handle dimension mismatch - action is taken before observation
+% So action has one less sample or needs alignment
+if length(k_values) ~= length(time)
+    % Pad k_values to match time
+    if length(k_values) < length(time)
+        k_values = [k_values; k_values(end) * ones(length(time) - length(k_values), 1)];
+    else
+        k_values = k_values(1:length(time));
+    end
+end
+
+% Ensure all are column vectors
+time = time(:);
+error_signal = error_signal(:);
+error_dot = error_dot(:);
+nz_actual = nz_actual(:);
+k_values = k_values(:);
 
 % Reconstruct reference signal
 ref_values = [50, -40, -15, 15, -1, 40];
@@ -87,7 +109,7 @@ fprintf('Average k (H-inf weight): %.4f\n', avg_k);
 
 % Calculate ITAE
 dt = 0.01;
-ITAE = sum(time(:) .* abs(error_signal(:))) * dt;
+ITAE = sum(time .* abs(error_signal)) * dt;
 fprintf('ITAE: %.4f\n', ITAE);
 
 %% Save figure
