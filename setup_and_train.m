@@ -6,22 +6,16 @@
 % MATLAB Version: R2022b with Reinforcement Learning Toolbox
 %
 % Usage:
-%   1. Place all files in the same folder as your Hinf_PID_Fuzzy.slx
+%   1. Place all files in the same folder as your Data.mat
 %   2. Run this script
 %   3. Training will start automatically
 %   4. After training, use test_trained_agent.m to evaluate
 
-clear; clc; close all;
+clear all; clc; close all;
 
 %% Step 1: Load Controller Data
 fprintf('Loading controller data...\n');
 load('Data.mat');
-
-% Store parameters in global for access in nested functions
-global Kp_g Ki_g Kd_g
-Kp_g = Kp;
-Ki_g = Ki;
-Kd_g = Kd;
 
 % Display loaded parameters
 fprintf('PID Parameters: Kp=%.4f, Ki=%.4f, Kd=%.4f\n', Kp, Ki, Kd);
@@ -29,39 +23,28 @@ fprintf('PID Parameters: Kp=%.4f, Ki=%.4f, Kd=%.4f\n', Kp, Ki, Kd);
 %% Step 2: Create the RL Training Environment
 fprintf('Setting up RL environment...\n');
 
-% State (Observations): [error, error_derivative, nz]
-numObs = 3;
-obsInfo = rlNumericSpec([numObs 1], ...
-    'LowerLimit', [-100; -500; -100], ...
-    'UpperLimit', [100; 500; 100], ...
-    'DataType', 'double');
-obsInfo.Name = 'states';
-obsInfo.Description = 'error, d_error, nz';
+% Create environment (defines its own obs/action specs internally)
+env = MissileEnv();
 
-% Action: weighting factor k in [0, 1]
-numAct = 1;
-actInfo = rlNumericSpec([numAct 1], ...
-    'LowerLimit', 0, ...
-    'UpperLimit', 1, ...
-    'DataType', 'double');
-actInfo.Name = 'k';
-actInfo.Description = 'H-inf/PID blend factor';
+% Get observation and action info from environment
+obsInfo = getObservationInfo(env);
+actInfo = getActionInfo(env);
 
-%% Step 3: Create Environment using class-based approach
-% Create environment object
-env = MissileEnv(obsInfo, actInfo);
+fprintf('Observation space: %s\n', mat2str(obsInfo.Dimension));
+fprintf('Action space: %s\n', mat2str(actInfo.Dimension));
 
 % Validate environment
 validateEnvironment(env);
 fprintf('Environment validated successfully!\n');
 
-%% Step 4: Create TD3 Agent Networks
+%% Step 3: Create TD3 Agent Networks
 fprintf('Creating TD3 agent networks...\n');
+
+numObs = obsInfo.Dimension(1);
+numAct = actInfo.Dimension(1);
 
 % Critic Network 1
 criticNet1 = createCriticNetwork(numObs, numAct);
-
-% For R2022b, use rlQValueFunction
 critic1 = rlQValueFunction(criticNet1, obsInfo, actInfo, ...
     'ObservationInputNames', 'obs', ...
     'ActionInputNames', 'act');
@@ -77,7 +60,7 @@ actorNet = createActorNetwork(numObs, numAct);
 actor = rlContinuousDeterministicActor(actorNet, obsInfo, actInfo, ...
     'ObservationInputNames', 'obs');
 
-%% Step 5: Configure TD3 Agent
+%% Step 4: Configure TD3 Agent
 fprintf('Configuring TD3 agent...\n');
 
 agentOpts = rlTD3AgentOptions(...
@@ -102,7 +85,7 @@ agentOpts.PolicyUpdateFrequency = 2;
 % Create the TD3 agent
 agent = rlTD3Agent(actor, [critic1, critic2], agentOpts);
 
-%% Step 6: Training Options
+%% Step 5: Training Options
 maxEpisodes = 500;
 maxSteps = 1200;  % 12 seconds at 0.01s sample time
 
@@ -120,13 +103,13 @@ trainOpts.SaveAgentCriteria = 'EpisodeReward';
 trainOpts.SaveAgentValue = -100;
 trainOpts.SaveAgentDirectory = 'savedAgents';
 
-%% Step 7: Train the Agent
+%% Step 6: Train the Agent
 fprintf('Starting TD3 training...\n');
 fprintf('This may take a while. Monitor the training progress window.\n');
 
 trainingStats = train(agent, env, trainOpts);
 
-%% Step 8: Save Results
+%% Step 7: Save Results
 save('trained_td3_agent.mat', 'agent', 'trainingStats');
 fprintf('Training complete! Agent saved to trained_td3_agent.mat\n');
 
