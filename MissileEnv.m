@@ -8,8 +8,8 @@ classdef MissileEnv < rl.env.MATLABEnvironment
         Ts = 0.01           % Sample time (s)
         MaxSteps = 1200     % Max steps per episode (12 seconds)
 
-        % Missile state
-        State = zeros(5,1)  % [alpha, q, nz, integrator, actuator_state]
+        % Missile state: [alpha, q, nz, integrator, actuator_state]
+        State = zeros(5,1)
 
         % Controller states
         PrevError = 0       % Previous error for derivative
@@ -62,13 +62,13 @@ classdef MissileEnv < rl.env.MATLABEnvironment
             loggedSignals = [];
 
             % Extract states
-            alpha = this.State(1);
-            q = this.State(2);
-            nz = this.State(3);
-            integrator = this.State(4);
+            alpha = this.State(1);      % Angle of attack (deg)
+            q = this.State(2);          % Pitch rate (deg/s)
+            nz = this.State(3);         % Normal acceleration (g)
+            integrator = this.State(4); % PID integrator
             actuatorState = this.State(5);
 
-            % Get action
+            % Get action (k value) - clamp to [0,1]
             k = min(max(double(action(1)), 0), 1);
 
             % Get reference
@@ -79,76 +79,128 @@ classdef MissileEnv < rl.env.MATLABEnvironment
             err = nzRef - nz;
             errDot = (err - this.PrevError) / this.Ts;
 
-            % Controllers
-            uHinf = -0.5 * err - 0.1 * q;
+            % Limit error derivative to avoid spikes
+            errDot = max(-1000, min(1000, errDot));
+
+            % H-infinity controller output (simplified proportional-derivative)
+            uHinf = -0.8 * err - 0.15 * q;
+
+            % PID controller output
             uPid = this.Kp * err + this.Ki * integrator + this.Kd * errDot;
 
-            % Blend
+            % Blend controllers
             uBlend = k * uHinf + (1 - k) * uPid;
 
-            % Actuator
-            actuatorState = 0.9 * actuatorState + 0.1 * uBlend;
-            deltaQ = max(-30, min(30, actuatorState));
+            % Limit control output
+            uBlend = max(-50, min(50, uBlend));
 
-            % Missile dynamics
-            g = 9.8; Vm = 790; qm = 0.66 * Vm^2 / 2;
-            Sref = 3.0828; dRef = 0.1981; Se = pi * dRef^2 / 4;
+            % Actuator dynamics (2nd order with damping)
+            % Transfer function: 32400 / (s^2 + 254.5s + 32400)
+            % Simplified as first-order for stability
+            tau_act = 1/180;  % Actuator time constant
+            actuatorState = actuatorState + (uBlend - actuatorState) * this.Ts / tau_act;
+            deltaQ = max(-30, min(30, actuatorState));  % Saturation ±30 deg
 
+            % Missile dynamics (more stable version)
+            g = 9.8;
+            Vm = 790;  % 2.5 Mach at 6000m
+            qm = 0.66 * Vm^2 / 2;  % Dynamic pressure
+            Sref = 3.0828;
+            dRef = 0.1981;
+            Se = pi * dRef^2 / 4;
+
+            % Time-varying mass
             if this.Time <= 8
                 m = 101.3 - (101.3 - 87.27) * this.Time / 8;
                 Iy_b = 33.2 - (33.2 - 32) * this.Time / 8;
             else
-                m = 87.27; Iy_b = 32;
+                m = 87.27;
+                Iy_b = 32;
             end
 
-            a11 = -qm * Sref * 0.202 / (m * Vm);
-            a21 = qm * Sref * dRef * 0.137 / Iy_b;
-            a22 = -qm * Sref * dRef^2 * 18.56 / (2 * Vm * Iy_b);
-            b11 = -qm * Sref * 0.0696 / (m * Vm);
-            b21 = -qm * Sref * dRef * 0.5014 / Iy_b;
+            % Aerodynamic derivatives (from the model)
+            Cn_alpha = 0.202;
+            Cn_q = 0.5734;
+            Cn_deltaq = 0.0696;
+            Cm_alpha = 0.137;
+            Cm_q = -18.56;
+            Cm_deltaq = -0.5014;
 
-            dAlpha = a11 * alpha + q + b11 * deltaQ;
+            % State space coefficients
+            a11 = -qm * Sref * Cn_alpha / (m * Vm);
+            a12 = 1 - qm * Sref * dRef * Cn_q / (2 * m * Vm);
+            a21 = qm * Sref * dRef * Cm_alpha / Iy_b;
+            a22 = qm * Sref * dRef^2 * Cm_q / (2 * Vm * Iy_b);
+
+            b11 = -qm * Sref * Cn_deltaq / (m * Vm);
+            b21 = qm * Sref * dRef * Cm_deltaq / Iy_b;
+
+            % State derivatives
+            dAlpha = a11 * alpha + a12 * q + b11 * deltaQ;
             dQ = a21 * alpha + a22 * q + b21 * deltaQ;
 
-            c11 = -qm * Se * 0.202 / m;
-            d11 = -qm * Se * 0.0696 / m;
+            % Normal acceleration output
+            c11 = -qm * Se * Cn_alpha / m;
+            d11 = -qm * Se * Cn_deltaq / m;
             newNz = (c11 * alpha + d11 * deltaQ) / g;
 
-            % Update state
+            % Update state with Euler integration
             this.State(1) = alpha + dAlpha * this.Ts;
             this.State(2) = q + dQ * this.Ts;
             this.State(3) = newNz;
-            this.State(4) = integrator + err * this.Ts;
+            this.State(4) = integrator + err * this.Ts;  % Update integrator
             this.State(5) = actuatorState;
+
+            % Anti-windup for integrator
+            this.State(4) = max(-100, min(100, this.State(4)));
 
             this.PrevError = err;
             this.Time = this.Time + this.Ts;
             this.CurrentStep = this.CurrentStep + 1;
 
-            % Reward
+            % Reward calculation
             if abs(nzRef) > 1
                 normErr = err / abs(nzRef);
             else
                 normErr = err;
             end
             deltaK = k - this.PrevK;
-            reward = -normErr^2 - 0.1*(errDot/100)^2 - 0.05*(deltaK*10)^2;
-            if abs(err) < 2
-                reward = reward + 0.2 * (1 - abs(err)/2);
+
+            % Main reward: tracking performance
+            reward = -normErr^2;
+
+            % Penalty for oscillations
+            reward = reward - 0.01 * (errDot/100)^2;
+
+            % Penalty for rapid k changes
+            reward = reward - 0.02 * (deltaK * 10)^2;
+
+            % Bonus for good tracking
+            if abs(err) < 5
+                reward = reward + 0.1 * (1 - abs(err)/5);
             end
+
+            % Penalty for extreme states (but don't terminate)
+            if abs(this.State(1)) > 30
+                reward = reward - 0.5;
+            end
+            if abs(newNz) > 100
+                reward = reward - 0.5;
+            end
+
             reward = max(-10, min(1, reward));
             this.PrevK = k;
 
-            % Observation - MUST be 3x1 double column vector
+            % Observation
             observation = [err; errDot; newNz];
 
-            % Done check
-            isDone = this.CurrentStep >= this.MaxSteps || abs(newNz) > 200 || abs(this.State(1)) > 50;
+            % Only terminate at max steps (removed early termination for instability)
+            isDone = this.CurrentStep >= this.MaxSteps;
         end
 
         function initialObs = reset(this)
-            % Reset state
-            this.State = [0.1*randn; 0.1*randn; 0; 0; 0];
+            % Reset state with small perturbations
+            this.State = [0.01*randn; 0.01*randn; 0; 0; 0];
             this.PrevError = 0;
             this.PrevK = 0.5;
             this.Time = 0;

@@ -68,10 +68,10 @@ agentOpts = rlTD3AgentOptions(...
     'DiscountFactor', 0.99, ...
     'TargetSmoothFactor', 0.005, ...
     'ExperienceBufferLength', 1e6, ...
-    'MiniBatchSize', 256);
+    'MiniBatchSize', 128);
 
 % Exploration noise
-agentOpts.ExplorationModel.StandardDeviation = 0.1;
+agentOpts.ExplorationModel.StandardDeviation = 0.2;
 agentOpts.ExplorationModel.StandardDeviationDecayRate = 1e-5;
 
 % Target policy smoothing (TD3 specific)
@@ -86,26 +86,27 @@ agentOpts.PolicyUpdateFrequency = 2;
 agent = rlTD3Agent(actor, [critic1, critic2], agentOpts);
 
 %% Step 5: Training Options
-maxEpisodes = 500;
-maxSteps = 1200;  % 12 seconds at 0.01s sample time
+maxEpisodes = 1000;  % Increased for better learning
+maxSteps = 1200;     % 12 seconds at 0.01s sample time
 
 trainOpts = rlTrainingOptions(...
     'MaxEpisodes', maxEpisodes, ...
     'MaxStepsPerEpisode', maxSteps, ...
-    'ScoreAveragingWindowLength', 20, ...
+    'ScoreAveragingWindowLength', 50, ...
     'Verbose', true, ...
     'Plots', 'training-progress', ...
     'StopTrainingCriteria', 'AverageReward', ...
-    'StopTrainingValue', -50);
+    'StopTrainingValue', 50);  % Set high so it trains fully
 
 % Save best agents during training
 trainOpts.SaveAgentCriteria = 'EpisodeReward';
-trainOpts.SaveAgentValue = -100;
+trainOpts.SaveAgentValue = -50;
 trainOpts.SaveAgentDirectory = 'savedAgents';
 
 %% Step 6: Train the Agent
 fprintf('Starting TD3 training...\n');
-fprintf('This may take a while. Monitor the training progress window.\n');
+fprintf('This will take a while. Monitor the training progress window.\n');
+fprintf('Training for up to %d episodes...\n', maxEpisodes);
 
 trainingStats = train(agent, env, trainOpts);
 
