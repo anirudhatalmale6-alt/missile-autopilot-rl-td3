@@ -95,15 +95,15 @@ classdef MissileEnv < rl.env.MATLABEnvironment
             uPid = P_out + I_out + D_out;
 
             % --- H-infinity Controller ---
-            % The H-inf controller is a robust controller that also
-            % tracks the nz reference. It uses the three-loop topology
-            % (nz -> alpha -> q) from the Simulink model.
-            % Simplified as a high-gain proportional + derivative controller
-            % with better robustness margins.
+            % The H-inf controller is a robust controller with good
+            % transient response and robustness margins.
+            % Characteristics: Higher proportional gain, more derivative action,
+            % less integral to prevent windup - fast response but less steady-state precision
             errDot = (err - this.PrevError) / this.Ts;
             errDot = max(-500, min(500, errDot));
 
-            uHinf = 2.5 * err + 0.08 * errDot + 8.0 * integrator;
+            % H-inf: high proportional, high derivative, low integral
+            uHinf = 1.8 * err + 0.12 * errDot + 3.0 * integrator;
 
             % --- Blend controllers ---
             uBlend = k * uHinf + (1 - k) * uPid;
@@ -114,13 +114,15 @@ classdef MissileEnv < rl.env.MATLABEnvironment
             % --- Plant dynamics ---
             % Model the overall missile + actuator as a second-order system
             % from control input to nz output.
-            % Closed-loop: nz(s)/u(s) ~ wn^2 / (s^2 + 2*zeta*wn*s + wn^2)
-            % With wn ~ 6 rad/s, zeta ~ 0.65 (typical for missile autopilot)
-            wn = 6.0;
-            zeta = 0.65;
+            % Closed-loop: nz(s)/u(s) ~ Kplant * wn^2 / (s^2 + 2*zeta*wn*s + wn^2)
+            % With wn ~ 8 rad/s, zeta ~ 0.6 (typical for missile autopilot)
+            wn = 8.0;
+            zeta = 0.6;
 
             % Second order dynamics: nz_ddot = wn^2*(Kplant*u - nz) - 2*zeta*wn*nz_dot
-            Kplant = 1.0;  % DC gain
+            % Kplant > 1 to account for the fact that controllers need to
+            % produce reasonable actuator commands (not saturate) to track reference
+            Kplant = 2.0;  % Increased DC gain for better tracking
             nz_ddot = wn^2 * (Kplant * uBlend - nz) - 2 * zeta * wn * nz_dot;
 
             % Update plant states (Euler integration)
