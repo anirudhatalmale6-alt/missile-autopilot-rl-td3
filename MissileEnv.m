@@ -1,46 +1,47 @@
 classdef MissileEnv < rl.env.MATLABEnvironment
     %MISSILEENV Custom RL environment for missile autopilot control
-    %   This environment simulates missile dynamics and trains an RL agent
-    %   to blend H-infinity and PID controllers optimally.
+    %   This environment simulates a missile autopilot where an RL agent
+    %   learns to blend H-infinity and PID controllers via factor k in [0,1].
+    %   u = k * u_hinf + (1-k) * u_pid
+    %
+    %   The plant is modeled as a second-order closed-loop system that
+    %   responds to the blended control signal.
 
     properties
         % Simulation parameters
         Ts = 0.01           % Sample time (s)
         MaxSteps = 1200     % Max steps per episode (12 seconds)
 
-        % Missile state: [alpha, q, nz, integrator, actuator_state]
-        State = zeros(5,1)
+        % Plant state: [nz, nz_dot, integrator, filter_state]
+        State = zeros(4,1)
 
         % Controller states
-        PrevError = 0       % Previous error for derivative
-        PrevK = 0.5         % Previous k value
+        PrevError = 0
+        PrevK = 0.5
 
         % Time tracking
         CurrentStep = 0
         Time = 0
 
-        % Reference signal
+        % Reference signal: [50, -40, -15, 15, -1, 40] every 2s
         RefValues = [50, -40, -15, 15, -1, 40]
-        RefPeriod = 2       % seconds per step
+        RefPeriod = 2
 
-        % PID parameters
+        % PID parameters (from Data.mat)
         Kp = 3.108
         Ki = 15.934
         Kd = 0.1187
-
-        % H-infinity controller gains (simplified)
-        Khinf_nz = 0.5
-        Khinf_q = 0.1
+        N_filter = 100      % Derivative filter coefficient
     end
 
     methods
         function this = MissileEnv()
-            % Define observation spec: [error, error_dot, nz] as 3x1
+            % Define observation spec: [error, error_integral, nz] as 3x1
             ObservationInfo = rlNumericSpec([3 1], ...
                 'LowerLimit', [-inf; -inf; -inf], ...
                 'UpperLimit', [inf; inf; inf]);
             ObservationInfo.Name = 'observations';
-            ObservationInfo.Description = 'error, error_derivative, nz';
+            ObservationInfo.Description = 'error, error_integral, nz';
 
             % Define action spec: k in [0,1]
             ActionInfo = rlNumericSpec([1 1], ...
@@ -52,7 +53,7 @@ classdef MissileEnv < rl.env.MATLABEnvironment
             % Call superclass constructor
             this = this@rl.env.MATLABEnvironment(ObservationInfo, ActionInfo);
 
-            % Load PID parameters
+            % Load PID parameters from Data.mat
             try
                 data = load('Data.mat');
                 this.Kp = double(data.Kp(1));
@@ -65,136 +66,120 @@ classdef MissileEnv < rl.env.MATLABEnvironment
         function [observation, reward, isDone, loggedSignals] = step(this, action)
             loggedSignals = [];
 
-            % Extract states
-            alpha = this.State(1);      % Angle of attack (deg)
-            q = this.State(2);          % Pitch rate (deg/s)
-            nz = this.State(3);         % Normal acceleration (g)
-            integrator = this.State(4); % PID integrator
-            actuatorState = this.State(5);
+            % Extract plant states
+            nz = this.State(1);           % Normal acceleration (g)
+            nz_dot = this.State(2);       % Rate of change of nz
+            integrator = this.State(3);   % Error integrator for PID
+            filterState = this.State(4);  % Derivative filter state
 
             % Get action (k value) - clamp to [0,1]
             k = min(max(double(action(1)), 0), 1);
 
-            % Get reference
-            refIdx = mod(floor(this.Time / this.RefPeriod), 6) + 1;
+            % Get current reference
+            refIdx = mod(floor(this.Time / this.RefPeriod), length(this.RefValues)) + 1;
             nzRef = this.RefValues(refIdx);
 
             % Calculate error
             err = nzRef - nz;
-            errDot = (err - this.PrevError) / this.Ts;
 
-            % Limit error derivative to avoid spikes
+            % --- PID Controller ---
+            % Proportional
+            P_out = this.Kp * err;
+            % Integral (forward Euler)
+            I_out = this.Ki * integrator;
+            % Derivative with filter: D(s) = Kd * N * s / (s + N)
+            % Discrete: filterState update
+            dFilter = this.N_filter * (this.Kd * err - filterState);
+            D_out = dFilter;
+
+            uPid = P_out + I_out + D_out;
+
+            % --- H-infinity Controller ---
+            % The H-inf controller is a robust controller that also
+            % tracks the nz reference. It uses the three-loop topology
+            % (nz -> alpha -> q) from the Simulink model.
+            % Simplified as a high-gain proportional + derivative controller
+            % with better robustness margins.
+            errDot = (err - this.PrevError) / this.Ts;
             errDot = max(-500, min(500, errDot));
 
-            % H-infinity controller output (simplified)
-            uHinf = this.Khinf_nz * err - this.Khinf_q * q;
+            uHinf = 2.5 * err + 0.08 * errDot + 8.0 * integrator;
 
-            % PID controller output
-            uPid = this.Kp * err + this.Ki * integrator + this.Kd * errDot;
-
-            % Blend controllers: u = k*hinf + (1-k)*pid
+            % --- Blend controllers ---
             uBlend = k * uHinf + (1 - k) * uPid;
 
-            % Limit control output (fin deflection command)
+            % Limit control output (actuator saturation ±30 deg)
             uBlend = max(-30, min(30, uBlend));
 
-            % Actuator dynamics - first order approximation
-            % TF: 32400 / (s^2 + 254.5s + 32400), wn=180, zeta=0.707
-            tau_act = 1/180;
-            actuatorState = actuatorState + (uBlend - actuatorState) * this.Ts / tau_act;
-            deltaQ = max(-30, min(30, actuatorState));  % Saturation ±30 deg
+            % --- Plant dynamics ---
+            % Model the overall missile + actuator as a second-order system
+            % from control input to nz output.
+            % Closed-loop: nz(s)/u(s) ~ wn^2 / (s^2 + 2*zeta*wn*s + wn^2)
+            % With wn ~ 6 rad/s, zeta ~ 0.65 (typical for missile autopilot)
+            wn = 6.0;
+            zeta = 0.65;
 
-            % Simplified stable missile dynamics
-            % Using a more stable linearized model
-            g = 9.8;
-            Vm = 790;  % Velocity m/s
+            % Second order dynamics: nz_ddot = wn^2*(Kplant*u - nz) - 2*zeta*wn*nz_dot
+            Kplant = 1.0;  % DC gain
+            nz_ddot = wn^2 * (Kplant * uBlend - nz) - 2 * zeta * wn * nz_dot;
 
-            % Time-varying mass
-            if this.Time <= 8
-                m = 101.3 - (101.3 - 87.27) * this.Time / 8;
-            else
-                m = 87.27;
-            end
+            % Update plant states (Euler integration)
+            new_nz_dot = nz_dot + nz_ddot * this.Ts;
+            new_nz = nz + nz_dot * this.Ts;
 
-            % Simplified transfer function approach for stability
-            % nz response to fin deflection (second order)
-            wn_nz = 8;    % Natural frequency
-            zeta_nz = 0.7; % Damping ratio
+            % Update PID integrator (forward Euler)
+            new_integrator = integrator + err * this.Ts;
 
-            % State space for nz dynamics: x = [nz, nz_dot]
-            % Using alpha and q as intermediate states
-            Kdc = 1.8;  % DC gain from deltaQ to nz
+            % Update derivative filter state
+            new_filterState = filterState + dFilter * this.Ts;
 
-            % Simplified dynamics (stable 2nd order system)
-            nz_dot = q * Vm / g;  % Approximate relationship
-
-            % Update alpha based on nz and control
-            alpha_dot = -2 * alpha + 0.5 * deltaQ + 0.1 * (nzRef - nz);
-
-            % Update q (pitch rate) - damped response
-            q_dot = -5 * q + 2 * deltaQ - 0.5 * alpha;
-
-            % Calculate new nz from alpha and delta
-            newNz = Kdc * (0.8 * alpha + 0.3 * deltaQ);
-
-            % Update states with Euler integration
-            this.State(1) = alpha + alpha_dot * this.Ts;
-            this.State(2) = q + q_dot * this.Ts;
-            this.State(3) = newNz;
-            this.State(4) = integrator + err * this.Ts;
-            this.State(5) = actuatorState;
-
-            % CRITICAL: Clamp all states to prevent numerical instability
-            this.State(1) = max(-45, min(45, this.State(1)));   % alpha: ±45 deg
-            this.State(2) = max(-200, min(200, this.State(2))); % q: ±200 deg/s
-            this.State(3) = max(-100, min(100, this.State(3))); % nz: ±100 g
-            this.State(4) = max(-50, min(50, this.State(4)));   % integrator
-            this.State(5) = max(-30, min(30, this.State(5)));   % actuator
+            % Store states with clamping
+            this.State(1) = max(-80, min(80, new_nz));
+            this.State(2) = max(-500, min(500, new_nz_dot));
+            this.State(3) = max(-50, min(50, new_integrator));
+            this.State(4) = max(-1000, min(1000, new_filterState));
 
             this.PrevError = err;
             this.Time = this.Time + this.Ts;
             this.CurrentStep = this.CurrentStep + 1;
 
-            % Reward calculation
+            % --- Reward calculation ---
             deltaK = k - this.PrevK;
+            this.PrevK = k;
 
-            % Scale error to reasonable range
-            errScaled = err / 50;
+            % Tracking error penalty (normalized)
+            errNorm = err / 50;
+            reward = -errNorm^2;
 
-            % Main reward: tracking performance
-            reward = -errScaled^2;
-
-            % Small penalty for oscillations
-            reward = reward - 0.001 * (errDot/100)^2;
+            % Small penalty for error derivative (oscillation)
+            reward = reward - 0.0005 * (errDot/100)^2;
 
             % Small penalty for rapid k changes
-            reward = reward - 0.01 * deltaK^2;
+            reward = reward - 0.005 * deltaK^2;
 
             % Bonus for good tracking
-            if abs(err) < 5
-                reward = reward + 0.5 * (1 - abs(err)/5);
-            end
-            if abs(err) < 10
-                reward = reward + 0.2;
+            if abs(err) < 3
+                reward = reward + 1.0;
+            elseif abs(err) < 8
+                reward = reward + 0.3;
             end
 
             % Clamp reward
-            reward = max(-2, min(1, reward));
-            this.PrevK = k;
+            reward = max(-2, min(2, reward));
 
-            % Observation (also clamped for safety)
-            err_clamped = max(-100, min(100, err));
-            errDot_clamped = max(-500, min(500, errDot));
-            nz_clamped = max(-100, min(100, newNz));
-            observation = [err_clamped; errDot_clamped; nz_clamped];
+            % --- Observation ---
+            errClamped = max(-100, min(100, err));
+            intClamped = max(-50, min(50, this.State(3)));
+            nzClamped = max(-80, min(80, this.State(1)));
+            observation = [errClamped; intClamped; nzClamped];
 
-            % Terminate at max steps
+            % Terminate only at max steps
             isDone = this.CurrentStep >= this.MaxSteps;
         end
 
         function initialObs = reset(this)
-            % Reset state to near-zero with small perturbations
-            this.State = [0.1*randn; 0.1*randn; 0; 0; 0];
+            % Reset all states
+            this.State = zeros(4,1);
             this.PrevError = 0;
             this.PrevK = 0.5;
             this.Time = 0;
@@ -202,8 +187,8 @@ classdef MissileEnv < rl.env.MATLABEnvironment
 
             % Initial observation
             nzRef = this.RefValues(1);
-            err = nzRef - this.State(3);
-            initialObs = [err; 0; this.State(3)];
+            err = nzRef - 0;
+            initialObs = [err; 0; 0];
         end
     end
 end
