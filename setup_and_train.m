@@ -86,7 +86,7 @@ agentOpts.PolicyUpdateFrequency = 2;
 agent = rlTD3Agent(actor, [critic1, critic2], agentOpts);
 
 %% Step 5: Training Options
-maxEpisodes = 1000;  % Increased for better learning
+maxEpisodes = 200;  % Reduced for faster training
 maxSteps = 1200;     % 12 seconds at 0.01s sample time
 
 trainOpts = rlTrainingOptions(...
