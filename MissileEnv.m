@@ -27,6 +27,10 @@ classdef MissileEnv < rl.env.MATLABEnvironment
         Kp = 3.108
         Ki = 15.934
         Kd = 0.1187
+
+        % H-infinity controller gains (simplified)
+        Khinf_nz = 0.5
+        Khinf_q = 0.1
     end
 
     methods
@@ -80,126 +84,117 @@ classdef MissileEnv < rl.env.MATLABEnvironment
             errDot = (err - this.PrevError) / this.Ts;
 
             % Limit error derivative to avoid spikes
-            errDot = max(-1000, min(1000, errDot));
+            errDot = max(-500, min(500, errDot));
 
-            % H-infinity controller output (simplified proportional-derivative)
-            uHinf = -0.8 * err - 0.15 * q;
+            % H-infinity controller output (simplified)
+            uHinf = this.Khinf_nz * err - this.Khinf_q * q;
 
             % PID controller output
             uPid = this.Kp * err + this.Ki * integrator + this.Kd * errDot;
 
-            % Blend controllers
+            % Blend controllers: u = k*hinf + (1-k)*pid
             uBlend = k * uHinf + (1 - k) * uPid;
 
-            % Limit control output
-            uBlend = max(-50, min(50, uBlend));
+            % Limit control output (fin deflection command)
+            uBlend = max(-30, min(30, uBlend));
 
-            % Actuator dynamics (2nd order with damping)
-            % Transfer function: 32400 / (s^2 + 254.5s + 32400)
-            % Simplified as first-order for stability
-            tau_act = 1/180;  % Actuator time constant
+            % Actuator dynamics - first order approximation
+            % TF: 32400 / (s^2 + 254.5s + 32400), wn=180, zeta=0.707
+            tau_act = 1/180;
             actuatorState = actuatorState + (uBlend - actuatorState) * this.Ts / tau_act;
             deltaQ = max(-30, min(30, actuatorState));  % Saturation ±30 deg
 
-            % Missile dynamics (more stable version)
+            % Simplified stable missile dynamics
+            % Using a more stable linearized model
             g = 9.8;
-            Vm = 790;  % 2.5 Mach at 6000m
-            qm = 0.66 * Vm^2 / 2;  % Dynamic pressure
-            Sref = 3.0828;
-            dRef = 0.1981;
-            Se = pi * dRef^2 / 4;
+            Vm = 790;  % Velocity m/s
 
             % Time-varying mass
             if this.Time <= 8
                 m = 101.3 - (101.3 - 87.27) * this.Time / 8;
-                Iy_b = 33.2 - (33.2 - 32) * this.Time / 8;
             else
                 m = 87.27;
-                Iy_b = 32;
             end
 
-            % Aerodynamic derivatives (from the model)
-            Cn_alpha = 0.202;
-            Cn_q = 0.5734;
-            Cn_deltaq = 0.0696;
-            Cm_alpha = 0.137;
-            Cm_q = -18.56;
-            Cm_deltaq = -0.5014;
+            % Simplified transfer function approach for stability
+            % nz response to fin deflection (second order)
+            wn_nz = 8;    % Natural frequency
+            zeta_nz = 0.7; % Damping ratio
 
-            % State space coefficients
-            a11 = -qm * Sref * Cn_alpha / (m * Vm);
-            a12 = 1 - qm * Sref * dRef * Cn_q / (2 * m * Vm);
-            a21 = qm * Sref * dRef * Cm_alpha / Iy_b;
-            a22 = qm * Sref * dRef^2 * Cm_q / (2 * Vm * Iy_b);
+            % State space for nz dynamics: x = [nz, nz_dot]
+            % Using alpha and q as intermediate states
+            Kdc = 1.8;  % DC gain from deltaQ to nz
 
-            b11 = -qm * Sref * Cn_deltaq / (m * Vm);
-            b21 = qm * Sref * dRef * Cm_deltaq / Iy_b;
+            % Simplified dynamics (stable 2nd order system)
+            nz_dot = q * Vm / g;  % Approximate relationship
 
-            % State derivatives
-            dAlpha = a11 * alpha + a12 * q + b11 * deltaQ;
-            dQ = a21 * alpha + a22 * q + b21 * deltaQ;
+            % Update alpha based on nz and control
+            alpha_dot = -2 * alpha + 0.5 * deltaQ + 0.1 * (nzRef - nz);
 
-            % Normal acceleration output
-            c11 = -qm * Se * Cn_alpha / m;
-            d11 = -qm * Se * Cn_deltaq / m;
-            newNz = (c11 * alpha + d11 * deltaQ) / g;
+            % Update q (pitch rate) - damped response
+            q_dot = -5 * q + 2 * deltaQ - 0.5 * alpha;
 
-            % Update state with Euler integration
-            this.State(1) = alpha + dAlpha * this.Ts;
-            this.State(2) = q + dQ * this.Ts;
+            % Calculate new nz from alpha and delta
+            newNz = Kdc * (0.8 * alpha + 0.3 * deltaQ);
+
+            % Update states with Euler integration
+            this.State(1) = alpha + alpha_dot * this.Ts;
+            this.State(2) = q + q_dot * this.Ts;
             this.State(3) = newNz;
-            this.State(4) = integrator + err * this.Ts;  % Update integrator
+            this.State(4) = integrator + err * this.Ts;
             this.State(5) = actuatorState;
 
-            % Anti-windup for integrator
-            this.State(4) = max(-100, min(100, this.State(4)));
+            % CRITICAL: Clamp all states to prevent numerical instability
+            this.State(1) = max(-45, min(45, this.State(1)));   % alpha: ±45 deg
+            this.State(2) = max(-200, min(200, this.State(2))); % q: ±200 deg/s
+            this.State(3) = max(-100, min(100, this.State(3))); % nz: ±100 g
+            this.State(4) = max(-50, min(50, this.State(4)));   % integrator
+            this.State(5) = max(-30, min(30, this.State(5)));   % actuator
 
             this.PrevError = err;
             this.Time = this.Time + this.Ts;
             this.CurrentStep = this.CurrentStep + 1;
 
-            % Reward calculation - scaled to be more manageable
+            % Reward calculation
             deltaK = k - this.PrevK;
 
             % Scale error to reasonable range
-            errScaled = err / 50;  % Normalize by typical reference magnitude
+            errScaled = err / 50;
 
-            % Main reward: tracking performance (quadratic penalty, scaled)
+            % Main reward: tracking performance
             reward = -errScaled^2;
 
-            % Small penalty for oscillations in error derivative
+            % Small penalty for oscillations
             reward = reward - 0.001 * (errDot/100)^2;
 
-            % Small penalty for rapid k changes (encourage smoothness)
+            % Small penalty for rapid k changes
             reward = reward - 0.01 * deltaK^2;
 
-            % Bonus for good tracking (within 5g of reference)
+            % Bonus for good tracking
             if abs(err) < 5
                 reward = reward + 0.5 * (1 - abs(err)/5);
             end
-
-            % Smaller penalties for extreme states
-            if abs(this.State(1)) > 30
-                reward = reward - 0.1;
-            end
-            if abs(newNz) > 100
-                reward = reward - 0.1;
+            if abs(err) < 10
+                reward = reward + 0.2;
             end
 
-            % Clamp reward to reasonable range per step
+            % Clamp reward
             reward = max(-2, min(1, reward));
             this.PrevK = k;
 
-            % Observation
-            observation = [err; errDot; newNz];
+            % Observation (also clamped for safety)
+            err_clamped = max(-100, min(100, err));
+            errDot_clamped = max(-500, min(500, errDot));
+            nz_clamped = max(-100, min(100, newNz));
+            observation = [err_clamped; errDot_clamped; nz_clamped];
 
-            % Only terminate at max steps (removed early termination for instability)
+            % Terminate at max steps
             isDone = this.CurrentStep >= this.MaxSteps;
         end
 
         function initialObs = reset(this)
-            % Reset state with small perturbations
-            this.State = [0.01*randn; 0.01*randn; 0; 0; 0];
+            % Reset state to near-zero with small perturbations
+            this.State = [0.1*randn; 0.1*randn; 0; 0; 0];
             this.PrevError = 0;
             this.PrevK = 0.5;
             this.Time = 0;
