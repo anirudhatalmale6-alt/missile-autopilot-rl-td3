@@ -94,9 +94,9 @@ agentOpts = rlTD3AgentOptions(...
     'ExperienceBufferLength', 1e6, ...
     'MiniBatchSize', 128);
 
-% Exploration noise
-agentOpts.ExplorationModel.StandardDeviation = 0.25;
-agentOpts.ExplorationModel.StandardDeviationDecayRate = 1e-5;
+% Exploration noise (increased for better k exploration)
+agentOpts.ExplorationModel.StandardDeviation = 0.4;
+agentOpts.ExplorationModel.StandardDeviationDecayRate = 5e-6;  % Slower decay
 
 % Target policy smoothing (TD3 specific)
 agentOpts.TargetPolicySmoothModel.StandardDeviation = 0.2;
@@ -120,7 +120,7 @@ trainOpts = rlTrainingOptions(...
     'Verbose', true, ...
     'Plots', 'training-progress', ...
     'StopTrainingCriteria', 'AverageReward', ...
-    'StopTrainingValue', 500);  % High value to train all episodes
+    'StopTrainingValue', 800);  % Higher value to ensure full training
 
 % Save best agents during training
 trainOpts.SaveAgentCriteria = 'EpisodeReward';
